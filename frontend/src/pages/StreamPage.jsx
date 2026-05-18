@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { Wifi, WifiOff, Eye, EyeOff, Pencil, Trash2, FlipHorizontal } from 'lucide-react';
+import { Wifi, WifiOff, Eye, EyeOff, Pencil, Trash2, FlipHorizontal, Settings, X } from 'lucide-react';
 import SpotlightCard from '../components/ui/SpotlightCard';
 import GlowButton from '../components/ui/GlowButton';
 import useVideoStream from '../hooks/useVideoStream';
@@ -25,7 +25,9 @@ const StreamPage = () => {
 
   // ── Inference controls ──
   const [inferenceEnabled, setInferenceEnabled] = useState(true);
-  const [confidence, setConfidence] = useState(0.5);
+
+  // ── Settings Modal ──
+  const [showSettings, setShowSettings] = useState(false);
 
   // ── Drawing state ──
   const [drawMode, setDrawMode] = useState(DRAW_MODES.NONE);
@@ -75,13 +77,6 @@ const StreamPage = () => {
     setWarningLine(null);
     setWarningFlip(false);
   };
-
-  // ── Confidence slider ──
-  const handleConfidenceChange = useCallback((e) => {
-    const val = parseFloat(e.target.value);
-    setConfidence(val);
-    sendConfig({ type: 'confidence', value: val });
-  }, [sendConfig]);
 
   // ── Toggle inference ──
   const handleToggleInference = useCallback(() => {
@@ -360,7 +355,7 @@ const StreamPage = () => {
   }, [roiPoints, countingLine, warningLine, warningFlip, tempPoints, drawMode, stats.crossing_total, stats.warnings]);
 
   return (
-    <div className="space-y-4 h-full flex flex-col">
+    <div className="space-y-4 h-full flex flex-col relative">
       {/* Header */}
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold tracking-tight">Live Camera Stream</h2>
@@ -373,11 +368,11 @@ const StreamPage = () => {
         </div>
       </div>
 
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 min-h-0">
+      <div className={cn("flex-1 grid gap-4 min-h-0", cameraConnected ? "grid-cols-1 lg:grid-cols-[1fr_320px]" : "grid-cols-1")}>
         {/* ═══ VIDEO PANEL ═══ */}
         <div
           ref={containerRef}
-          className="relative bg-slate-950/80 backdrop-blur-xl border border-slate-800 rounded-2xl overflow-hidden group"
+          className="relative bg-slate-950/80 backdrop-blur-xl border border-slate-800 rounded-2xl overflow-hidden group min-h-[400px]"
         >
           {/* Video frame */}
           <img
@@ -409,34 +404,79 @@ const StreamPage = () => {
             onMouseLeave={handleCanvasMouseUp}
           />
 
-          {/* Waiting state */}
+          {/* Connection Form (Waiting state) */}
           {!cameraConnected && (
-            <div className="absolute inset-0 flex items-center justify-center flex-col gap-4 z-20">
-              <div className="w-16 h-16 rounded-full border-4 border-slate-800 border-t-blue-500 animate-spin" />
-              <p className="text-slate-500">Chưa kết nối camera...</p>
+            <div className="absolute inset-0 flex items-center justify-center z-20 bg-slate-900/40 backdrop-blur-sm p-4">
+              <div className="bg-slate-900 border border-slate-700 p-8 rounded-2xl shadow-2xl w-full max-w-sm">
+                <div className="flex items-center justify-center mb-6">
+                  <div className="w-12 h-12 rounded-full bg-blue-500/10 flex items-center justify-center border border-blue-500/20 shadow-[0_0_15px_rgba(59,130,246,0.2)]">
+                    <Wifi size={24} className="text-blue-400" />
+                  </div>
+                </div>
+                <h3 className="text-xl font-bold text-white mb-6 text-center">Kết nối Camera</h3>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1.5 ml-1">IP Camera</label>
+                    <input
+                      type="text"
+                      placeholder="VD: 192.168.1.64"
+                      value={cameraIp}
+                      onChange={(e) => setCameraIp(e.target.value)}
+                      className="w-full bg-slate-800/60 border border-slate-700/50 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500/50 transition-colors text-white placeholder:text-slate-600"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1.5 ml-1">Username</label>
+                    <input
+                      type="text"
+                      placeholder="admin"
+                      value={cameraUser}
+                      onChange={(e) => setCameraUser(e.target.value)}
+                      className="w-full bg-slate-800/60 border border-slate-700/50 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500/50 transition-colors text-white placeholder:text-slate-600"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1.5 ml-1">Mật khẩu</label>
+                    <input
+                      type="password"
+                      placeholder="Nhập mật khẩu"
+                      value={cameraPass}
+                      onChange={(e) => setCameraPass(e.target.value)}
+                      className="w-full bg-slate-800/60 border border-slate-700/50 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500/50 transition-colors text-white placeholder:text-slate-600"
+                    />
+                  </div>
+                  {connectError && <p className="text-xs text-red-400 text-center font-medium">{connectError}</p>}
+                  <GlowButton variant="blue" className="w-full mt-4 py-3" onClick={handleConnect} disabled={connectLoading}>
+                    {connectLoading ? 'Đang kết nối...' : 'Kết nối'}
+                  </GlowButton>
+                </div>
+              </div>
             </div>
           )}
 
           {/* Draw mode indicator */}
           {drawMode !== DRAW_MODES.NONE && (
-            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 bg-black/70 backdrop-blur px-4 py-2 rounded-full border border-blue-500/30 text-sm">
-              <span className="text-blue-400 font-medium">
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-black/80 backdrop-blur-md px-5 py-2.5 rounded-full border border-blue-500/30 text-sm shadow-xl flex items-center gap-3">
+              <span className="text-blue-400 font-medium whitespace-nowrap">
                 {drawMode === DRAW_MODES.ROI && '🎯 Vẽ ROI — Click để thêm điểm, Double-click để hoàn tất'}
                 {drawMode === DRAW_MODES.COUNTING_LINE && '📏 Vẽ Counting Line — Click 2 điểm'}
                 {drawMode === DRAW_MODES.WARNING_LINE && '⚠️ Vẽ Warning Line — Click 2 điểm'}
               </span>
-              <span className="text-slate-500 ml-2">(Chuột phải để hủy)</span>
+              <div className="w-px h-4 bg-slate-700" />
+              <span className="text-slate-400 text-xs whitespace-nowrap">Chuột phải để hủy</span>
             </div>
           )}
 
           {/* Bottom overlay */}
           {cameraConnected && (
-            <div className="absolute bottom-0 inset-x-0 p-3 bg-gradient-to-t from-black/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity z-20">
+            <div className="absolute bottom-0 inset-x-0 p-4 bg-gradient-to-t from-black/90 via-black/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity z-20">
               <div className="flex items-center gap-4 text-sm">
-                <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,1)]" />
-                <span className="font-medium">LIVE</span>
-                <span className="text-slate-400 ml-auto">
-                  Display: {stats.display_fps || 0} FPS | AI: {stats.inference_fps || 0} FPS
+                <div className="flex items-center gap-2 bg-black/40 backdrop-blur px-3 py-1.5 rounded-lg border border-white/10">
+                  <div className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,1)]" />
+                  <span className="font-semibold text-white tracking-wider text-xs">LIVE</span>
+                </div>
+                <span className="text-slate-300 ml-auto font-mono bg-black/40 backdrop-blur px-3 py-1.5 rounded-lg border border-white/10">
+                  Display: <span className="text-white">{stats.display_fps || 0}</span> FPS &bull; AI: <span className="text-blue-400">{stats.inference_fps || 0}</span> FPS
                 </span>
               </div>
             </div>
@@ -444,190 +484,161 @@ const StreamPage = () => {
         </div>
 
         {/* ═══ CONTROL PANEL ═══ */}
-        <div className="flex flex-col gap-4 overflow-y-auto pr-1">
-          {/* Connection */}
-          <SpotlightCard>
-            <h3 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-              {cameraConnected ? <Wifi size={16} className="text-emerald-400" /> : <WifiOff size={16} className="text-slate-500" />}
-              Kết nối Camera
-            </h3>
-            {!cameraConnected ? (
-              <div className="space-y-2.5">
-                <input
-                  type="text"
-                  placeholder="IP Camera (VD: 192.168.1.64)"
-                  value={cameraIp}
-                  onChange={(e) => setCameraIp(e.target.value)}
-                  className="w-full bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500/50 transition-colors placeholder:text-slate-600"
-                />
-                <input
-                  type="text"
-                  placeholder="Username"
-                  value={cameraUser}
-                  onChange={(e) => setCameraUser(e.target.value)}
-                  className="w-full bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500/50 transition-colors placeholder:text-slate-600"
-                />
-                <input
-                  type="password"
-                  placeholder="Mật khẩu"
-                  value={cameraPass}
-                  onChange={(e) => setCameraPass(e.target.value)}
-                  className="w-full bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500/50 transition-colors placeholder:text-slate-600"
-                />
-                {connectError && <p className="text-xs text-red-400">{connectError}</p>}
-                <GlowButton variant="blue" className="w-full" onClick={handleConnect} disabled={connectLoading}>
-                  {connectLoading ? 'Đang kết nối...' : 'Kết nối'}
-                </GlowButton>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 text-sm">
-                  <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  <span className="text-emerald-400 font-medium">Đã kết nối</span>
-                  <span className="text-slate-500 text-xs ml-auto">{cameraIp}</span>
-                </div>
-                <button
-                  onClick={handleDisconnect}
-                  className="w-full py-2 text-sm font-medium bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded-lg transition-all"
-                >
-                  Ngắt kết nối
-                </button>
-              </div>
-            )}
-          </SpotlightCard>
-
-          {/* Inference Controls */}
-          <SpotlightCard>
-            <h3 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-              {inferenceEnabled ? <Eye size={16} className="text-blue-400" /> : <EyeOff size={16} className="text-slate-500" />}
-              AI Inference
-            </h3>
-            <div className="space-y-3">
+        {cameraConnected && (
+          <div className="flex flex-col gap-4 overflow-y-auto pr-1">
+            {/* Quick Actions */}
+            <div className="grid grid-cols-2 gap-3">
               <button
-                onClick={handleToggleInference}
-                className={cn(
-                  "w-full py-2 text-sm font-medium rounded-lg border transition-all",
-                  inferenceEnabled
-                    ? "bg-blue-500/10 text-blue-400 border-blue-500/20 hover:bg-blue-500/20"
-                    : "bg-slate-800/50 text-slate-400 border-slate-700/50 hover:bg-slate-700/50"
-                )}
+                onClick={() => setShowSettings(true)}
+                className="py-3 text-sm font-semibold bg-slate-800/80 hover:bg-slate-700/80 text-white border border-slate-700/50 rounded-2xl transition-all flex items-center justify-center gap-2 shadow-sm"
               >
-                {inferenceEnabled ? 'AI Đang Bật' : 'AI Đang Tắt'}
+                <Settings size={18} className="text-blue-400" /> Cài đặt
               </button>
-              <div>
-                <div className="flex justify-between text-xs text-slate-400 mb-1">
-                  <span>Confidence</span>
-                  <span className="text-blue-400 font-mono">{confidence.toFixed(2)}</span>
-                </div>
-                <input
-                  type="range" min="0.1" max="1.0" step="0.05"
-                  value={confidence}
-                  onChange={handleConfidenceChange}
-                  className="w-full h-1.5 bg-slate-700 rounded-full appearance-none cursor-pointer accent-blue-500"
-                />
-              </div>
+              <button
+                onClick={handleDisconnect}
+                className="py-3 text-sm font-semibold bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded-2xl transition-all flex items-center justify-center gap-2 shadow-sm"
+              >
+                <WifiOff size={18} /> Ngắt kết nối
+              </button>
             </div>
-          </SpotlightCard>
 
-          {/* Drawing Tools */}
-          <SpotlightCard>
-            <h3 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-              <Pencil size={16} className="text-cyan-400" />
-              Công cụ vẽ
-            </h3>
-            <div className="grid grid-cols-1 gap-2">
-              <button
-                onClick={() => { setDrawMode(DRAW_MODES.ROI); setTempPoints([]); }}
-                disabled={!cameraConnected}
-                className={cn(
-                  "py-2 text-xs font-medium rounded-lg border transition-all disabled:opacity-40",
-                  drawMode === DRAW_MODES.ROI
-                    ? "bg-cyan-500/15 text-cyan-400 border-cyan-500/30"
-                    : "bg-slate-800/50 text-slate-400 border-slate-700/50 hover:bg-slate-700/50"
-                )}
-              >
-                🎯 Vẽ ROI Polygon
-              </button>
-              <button
-                onClick={() => { setDrawMode(DRAW_MODES.COUNTING_LINE); setTempPoints([]); }}
-                disabled={!cameraConnected}
-                className={cn(
-                  "py-2 text-xs font-medium rounded-lg border transition-all disabled:opacity-40",
-                  drawMode === DRAW_MODES.COUNTING_LINE
-                    ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
-                    : "bg-slate-800/50 text-slate-400 border-slate-700/50 hover:bg-slate-700/50"
-                )}
-              >
-                📏 Vẽ Counting Line
-              </button>
-              <button
-                onClick={() => { setDrawMode(DRAW_MODES.WARNING_LINE); setTempPoints([]); }}
-                disabled={!cameraConnected}
-                className={cn(
-                  "py-2 text-xs font-medium rounded-lg border transition-all disabled:opacity-40",
-                  drawMode === DRAW_MODES.WARNING_LINE
-                    ? "bg-red-500/15 text-red-400 border-red-500/30"
-                    : "bg-slate-800/50 text-slate-400 border-slate-700/50 hover:bg-slate-700/50"
-                )}
-              >
-                ⚠️ Vẽ Warning Line
-              </button>
-              {warningLine && (
-                <button
-                  onClick={() => { setWarningFlip(!warningFlip); }}
-                  className="py-2 text-xs font-medium rounded-lg border bg-orange-500/10 text-orange-400 border-orange-500/20 hover:bg-orange-500/20 transition-all flex items-center justify-center gap-1"
-                >
-                  <FlipHorizontal size={14} /> Flip Warning
-                </button>
-              )}
-              {(roiPoints.length > 0 || countingLine || warningLine) && (
-                <button
-                  onClick={() => { setRoiPoints([]); setCountingLine(null); setWarningLine(null); setWarningFlip(false); sendConfig({ type: 'zones', roi_points: null, counting_line: null, warning_line: null, warning_flip: false }); }}
-                  className="py-2 text-xs font-medium rounded-lg border bg-slate-800/50 text-slate-400 border-slate-700/50 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/20 transition-all flex items-center justify-center gap-1"
-                >
-                  <Trash2 size={14} /> Xóa tất cả
-                </button>
-              )}
-            </div>
-          </SpotlightCard>
-
-          {/* Stats */}
-          <SpotlightCard>
-            <h3 className="text-sm font-semibold text-slate-300 mb-3">📊 Thống kê</h3>
-            <div className="space-y-2">
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-500">Tổng phát hiện</span>
-                <span className="text-blue-400 font-mono font-bold text-base">{stats.total_detections}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-500">Đã qua vạch</span>
-                <span className="text-emerald-400 font-mono font-bold text-base">
-                  {stats.crossing_total || 0}
-                </span>
-              </div>
-              {/* Class counts */}
-              {stats.class_counts && Object.keys(stats.class_counts).length > 0 && (
-                <div className="mt-2 pt-2 border-t border-slate-700/50 space-y-1.5">
-                  {Object.entries(stats.class_counts).map(([name, count]) => (
-                    <div key={name} className="flex justify-between text-xs">
-                      <span className="text-slate-400 truncate mr-2">{name}</span>
-                      <span className="text-white font-mono font-semibold">{count}</span>
+            {/* Stats */}
+            <SpotlightCard>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <span className="text-lg">📊</span> Thống kê
+              </h3>
+              <div className="space-y-4">
+                <div className="flex flex-col gap-1 bg-emerald-500/10 px-4 py-3 rounded-xl border border-emerald-500/20">
+                  <span className="text-emerald-400/80 text-xs font-medium uppercase tracking-wider">Đã qua vạch</span>
+                  <span className="text-emerald-400 font-mono font-bold text-3xl leading-none">
+                    {stats.crossing_total || 0}
+                  </span>
+                </div>
+                {/* Class counts */}
+                {stats.class_counts && Object.keys(stats.class_counts).length > 0 && (
+                  <div className="pt-2">
+                    <h4 className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-2">Chi tiết sản phẩm</h4>
+                    <div className="space-y-2">
+                      {Object.entries(stats.class_counts).map(([name, count]) => (
+                        <div key={name} className="flex justify-between text-sm items-center px-1">
+                          <span className="text-slate-300 truncate mr-2">{name}</span>
+                          <span className="text-white font-mono font-semibold bg-slate-800/80 border border-slate-700 px-2.5 py-0.5 rounded-md min-w-[2rem] text-center">{count}</span>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              )}
-              {/* Warnings */}
-              {stats.warnings && stats.warnings.length > 0 && (
-                <div className="mt-2 pt-2 border-t border-red-500/20 space-y-1">
-                  {stats.warnings.slice(0, 3).map((w, i) => (
-                    <p key={i} className="text-xs text-red-400 bg-red-500/10 px-2 py-1 rounded">⚠ {w}</p>
-                  ))}
-                </div>
-              )}
-            </div>
-          </SpotlightCard>
-        </div>
+                  </div>
+                )}
+                {/* Warnings */}
+                {stats.warnings && stats.warnings.length > 0 && (
+                  <div className="pt-3 border-t border-red-500/20 space-y-2">
+                    <h4 className="text-xs font-medium text-red-400/80 uppercase tracking-wider mb-1">Cảnh báo</h4>
+                    {stats.warnings.slice(0, 3).map((w, i) => (
+                      <p key={i} className="text-xs text-red-300 bg-red-500/15 px-3 py-2 rounded-lg border border-red-500/20 flex items-start gap-2 leading-relaxed">
+                        <span className="text-base leading-none mt-0.5">⚠️</span> {w}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </SpotlightCard>
+          </div>
+        )}
       </div>
+
+      {/* ═══ SETTINGS MODAL ═══ */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl shadow-2xl w-full max-w-sm relative animate-in fade-in zoom-in-95 duration-200">
+            <button 
+              onClick={() => setShowSettings(false)}
+              className="absolute top-4 right-4 text-slate-500 hover:text-white transition-colors bg-slate-800/50 hover:bg-slate-700 p-1.5 rounded-lg"
+            >
+              <X size={18} />
+            </button>
+            <h3 className="text-lg font-bold text-white mb-6 flex items-center gap-2">
+              <Settings size={20} className="text-blue-400" />
+              Cài đặt & Công cụ
+            </h3>
+            
+            <div className="space-y-6">
+              {/* AI Inference Toggle */}
+              <div>
+                <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Trạng thái AI</h4>
+                <button
+                  onClick={handleToggleInference}
+                  className={cn(
+                    "w-full py-3 text-sm font-semibold rounded-xl border transition-all flex items-center justify-center gap-2",
+                    inferenceEnabled
+                      ? "bg-blue-500/15 text-blue-400 border-blue-500/30 hover:bg-blue-500/25 shadow-[0_0_15px_rgba(59,130,246,0.15)]"
+                      : "bg-slate-800/50 text-slate-400 border-slate-700/50 hover:bg-slate-700/50"
+                  )}
+                >
+                  {inferenceEnabled ? <Eye size={18} /> : <EyeOff size={18} />}
+                  {inferenceEnabled ? 'AI Đang Bật' : 'AI Đang Tắt'}
+                </button>
+              </div>
+
+              {/* Drawing Tools */}
+              <div>
+                <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Công cụ vẽ</h4>
+                <div className="grid grid-cols-1 gap-2.5">
+                  <button
+                    onClick={() => { setDrawMode(DRAW_MODES.ROI); setTempPoints([]); setShowSettings(false); }}
+                    className={cn(
+                      "py-2.5 text-sm font-medium rounded-xl border transition-all flex items-center justify-center gap-2",
+                      drawMode === DRAW_MODES.ROI
+                        ? "bg-cyan-500/15 text-cyan-400 border-cyan-500/30 shadow-[0_0_15px_rgba(6,182,212,0.15)]"
+                        : "bg-slate-800/40 text-slate-300 border-slate-700/50 hover:bg-slate-700/50"
+                    )}
+                  >
+                    🎯 Vẽ ROI Polygon
+                  </button>
+                  <button
+                    onClick={() => { setDrawMode(DRAW_MODES.COUNTING_LINE); setTempPoints([]); setShowSettings(false); }}
+                    className={cn(
+                      "py-2.5 text-sm font-medium rounded-xl border transition-all flex items-center justify-center gap-2",
+                      drawMode === DRAW_MODES.COUNTING_LINE
+                        ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.15)]"
+                        : "bg-slate-800/40 text-slate-300 border-slate-700/50 hover:bg-slate-700/50"
+                    )}
+                  >
+                    📏 Vẽ Counting Line
+                  </button>
+                  <button
+                    onClick={() => { setDrawMode(DRAW_MODES.WARNING_LINE); setTempPoints([]); setShowSettings(false); }}
+                    className={cn(
+                      "py-2.5 text-sm font-medium rounded-xl border transition-all flex items-center justify-center gap-2",
+                      drawMode === DRAW_MODES.WARNING_LINE
+                        ? "bg-red-500/15 text-red-400 border-red-500/30 shadow-[0_0_15px_rgba(239,68,68,0.15)]"
+                        : "bg-slate-800/40 text-slate-300 border-slate-700/50 hover:bg-slate-700/50"
+                    )}
+                  >
+                    ⚠️ Vẽ Warning Line
+                  </button>
+
+                  {/* Actions */}
+                  {warningLine && (
+                    <button
+                      onClick={() => { setWarningFlip(!warningFlip); }}
+                      className="py-2.5 mt-2 text-sm font-medium rounded-xl border bg-orange-500/10 text-orange-400 border-orange-500/20 hover:bg-orange-500/20 transition-all flex items-center justify-center gap-2"
+                    >
+                      <FlipHorizontal size={16} /> Lật hướng Warning
+                    </button>
+                  )}
+                  {(roiPoints.length > 0 || countingLine || warningLine) && (
+                    <button
+                      onClick={() => { setRoiPoints([]); setCountingLine(null); setWarningLine(null); setWarningFlip(false); sendConfig({ type: 'zones', roi_points: null, counting_line: null, warning_line: null, warning_flip: false }); }}
+                      className="py-2.5 mt-2 text-sm font-medium rounded-xl border bg-slate-800/50 text-slate-400 border-slate-700/50 hover:bg-red-500/15 hover:text-red-400 hover:border-red-500/30 transition-all flex items-center justify-center gap-2"
+                    >
+                      <Trash2 size={16} /> Xóa tất cả hình vẽ
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
