@@ -1,0 +1,83 @@
+# ==========================================
+# GITHUB IGNORE FILE CHO VISION AI PROJECT
+# ==========================================
+
+# 1. Môi trường hệ điều hành & Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ==========================================
+# 2. FRONTEND (React + Vite)
+# ==========================================
+# Dependencies
+frontend/node_modules/
+frontend/.pnp
+frontend/.pnp.js
+
+# Build outputs
+frontend/dist/
+frontend/dist-ssr/
+
+# Logs
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+
+# Môi trường (Nếu có khai báo biến env cục bộ ở frontend)
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# Cache
+frontend/.eslintcache
+frontend/.vite/
+
+# ==========================================
+# 3. BACKEND (FastAPI + Python + YOLO)
+# ==========================================
+# Môi trường ảo (Virtual Env)
+backend/venv/
+backend/env/
+backend/.env
+
+# Byte-compiled / optimized / DLL files
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+
+# Dữ liệu vật lý & Cache (Tuân thủ rule backend-01)
+backend/data/
+backend/local_cache/
+backend/yolo_dataset/
+
+# Ultralytics / YOLO artifacts (Trọng số model tải về & kết quả training)
+backend/runs/
+backend/*.pt
+backend/yolov8n.pt
+backend/yolov8s.pt
+
+# Logs & Databases
+**/*.log
+**/*.sqlite3
+
+# Test images
+backend/*.jpg
+backend/*.jpeg
+backend/*.png
+backend/alembic/versions/*.pyc
+
+# Cấu hình IDE Python
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.coverage
+backend/htmlcov/
