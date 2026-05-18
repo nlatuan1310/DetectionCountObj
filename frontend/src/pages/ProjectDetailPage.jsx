@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Upload, Trash2, Loader2 } from 'lucide-react';
+import { ArrowLeft, Upload, Trash2, Loader2, Layers } from 'lucide-react';
 import { cn } from '../utils/cn';
 import GlowButton from '../components/ui/GlowButton';
 import ImageGrid from '../components/Dataset/ImageGrid';
@@ -119,6 +119,17 @@ const ProjectDetailPage = () => {
         </div>
 
         <div className="flex gap-2">
+          <button
+            onClick={() => navigate(`/projects/${projectId}/versions`)}
+            className={cn(
+              'flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-xl',
+              'bg-violet-500/10 text-violet-400 border border-violet-500/20',
+              'hover:bg-violet-500/20 transition-all duration-200'
+            )}
+          >
+            <Layers size={16} />
+            Versions
+          </button>
           <GlowButton variant="blue" onClick={() => setShowUpload(true)}>
             <Upload size={16} className="mr-2" />
             Upload Ảnh

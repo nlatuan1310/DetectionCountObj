@@ -1,5 +1,5 @@
 ---
-trigger: always_on
+trigger: model_decision
 ---
 
 # Rule: Tối ưu hiệu năng (Performance)

@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { cn } from '../../utils/cn';
 import GlowButton from '../ui/GlowButton';
+import { Loader2, Image as ImageIcon } from 'lucide-react';
+import { previewAugmentation } from '../../services/dataset_version_service';
 
 const AUGMENTATION_OPTIONS = [
   {
@@ -47,7 +49,7 @@ const AUGMENTATION_OPTIONS = [
   },
 ];
 
-const AugmentationConfigForm = ({ onSubmit, initialConfig = {}, versionName = '' }) => {
+const AugmentationConfigForm = ({ onSubmit, initialConfig = {}, versionName = '', projectId }) => {
   const [name, setName] = useState(versionName);
   const [config, setConfig] = useState(() => {
     const initial = {};
@@ -58,6 +60,33 @@ const AugmentationConfigForm = ({ onSubmit, initialConfig = {}, versionName = ''
     return initial;
   });
   const [submitting, setSubmitting] = useState(false);
+  
+  const [previewImage, setPreviewImage] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState(null);
+
+  useEffect(() => {
+    if (!projectId) return;
+
+    const fetchPreview = async () => {
+      setPreviewLoading(true);
+      setPreviewError(null);
+      try {
+        const res = await previewAugmentation(projectId, config);
+        setPreviewImage(res.image_base64);
+      } catch (err) {
+        setPreviewError('Không thể load ảnh preview');
+      } finally {
+        setPreviewLoading(false);
+      }
+    };
+
+    const debounceTimer = setTimeout(() => {
+      fetchPreview();
+    }, 500);
+
+    return () => clearTimeout(debounceTimer);
+  }, [projectId, config]);
 
   const toggleOption = (key) => {
     setConfig((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -76,6 +105,37 @@ const AugmentationConfigForm = ({ onSubmit, initialConfig = {}, versionName = ''
 
   return (
     <div className="space-y-5">
+      {/* Preview Image */}
+      {projectId && (
+        <div className="mb-2">
+          <label className="block text-sm font-medium text-slate-300 mb-2">
+            Xem trước ảnh (Preview)
+          </label>
+          <div className="relative w-full aspect-video rounded-xl bg-slate-900 border border-slate-700/50 overflow-hidden flex items-center justify-center">
+            {previewLoading && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm">
+                <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
+              </div>
+            )}
+            
+            {previewImage ? (
+              <img 
+                src={`data:image/jpeg;base64,${previewImage}`} 
+                alt="Preview Augmentation" 
+                className="w-full h-full object-contain"
+              />
+            ) : previewError ? (
+              <div className="text-sm text-red-400">{previewError}</div>
+            ) : (
+              <div className="flex flex-col items-center text-slate-600">
+                <ImageIcon className="w-8 h-8 mb-2" />
+                <span className="text-xs">Chưa có ảnh</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Version Name */}
       <div>
         <label className="block text-sm font-medium text-slate-300 mb-1.5">

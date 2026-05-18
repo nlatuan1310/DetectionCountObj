@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: visionai_backend
+    # Ghi đè lệnh chạy mặc định để thêm --reload tiện cho việc phát triển (Dev)
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    volumes:
+      # Mount code để có thể sửa code không cần build lại (cho môi trường dev)
+      - ./backend:/app
+      # Mount thư mục data để bảo toàn ảnh và dữ liệu được lưu cục bộ
+      - ./backend/data:/app/data
+      # Bỏ qua mount thư mục venv và __pycache__ vào container (tránh đè venv linux)
+      - /app/venv
+      - /app/__pycache__
+    restart: unless-stopped

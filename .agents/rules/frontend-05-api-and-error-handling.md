@@ -1,5 +1,5 @@
 ---
-trigger: always_on
+trigger: model_decision
 ---
 
 # Rule: Giao tiếp API và Xử lý lỗi

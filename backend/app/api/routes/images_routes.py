@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,12 +44,11 @@ async def upload_images(
     uploaded = []
     failed = []
 
-    for file in files:
+    async def process_file(file: UploadFile):
         try:
             # Validate content type
             if not file.content_type or not file.content_type.startswith("image/"):
-                failed.append(f"{file.filename}: Không phải file ảnh")
-                continue
+                return {"success": False, "filename": file.filename, "error": "Không phải file ảnh"}
 
             # Upload kép
             storage_result = await StorageService.upload_image(file)
@@ -63,22 +63,34 @@ async def upload_images(
                 is_background=is_background,
             )
 
-            uploaded.append({
-                "id": image.id,
-                "project_id": image.project_id,
-                "cloudinary_url": image.cloudinary_url,
-                "local_path": image.local_path,
-                "original_filename": image.original_filename,
-                "is_golden": image.is_golden,
-                "is_background": image.is_background,
-                "uploaded_at": image.uploaded_at,
-                "annotation_count": 0,
-            })
+            return {
+                "success": True,
+                "data": {
+                    "id": image.id,
+                    "project_id": image.project_id,
+                    "cloudinary_url": image.cloudinary_url,
+                    "local_path": image.local_path,
+                    "original_filename": image.original_filename,
+                    "is_golden": image.is_golden,
+                    "is_background": image.is_background,
+                    "uploaded_at": image.uploaded_at,
+                    "annotation_count": 0,
+                }
+            }
         except ValueError as e:
-            failed.append(f"{file.filename}: {str(e)}")
+            return {"success": False, "filename": file.filename, "error": str(e)}
         except Exception as e:
             logger.error("Upload failed for %s: %s", file.filename, str(e))
-            failed.append(f"{file.filename}: Lỗi hệ thống")
+            return {"success": False, "filename": file.filename, "error": "Lỗi hệ thống"}
+
+    tasks = [process_file(f) for f in files]
+    results = await asyncio.gather(*tasks)
+
+    for res in results:
+        if res["success"]:
+            uploaded.append(res["data"])
+        else:
+            failed.append(f"{res['filename']}: {res['error']}")
 
     return {
         "uploaded": uploaded,
