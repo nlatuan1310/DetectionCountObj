@@ -1,5 +1,7 @@
 import uuid
 import logging
+import asyncio
+from functools import partial
 from pathlib import Path
 
 import cloudinary
@@ -60,10 +62,15 @@ class StorageService:
             content = await file.read()
             await file.seek(0)
 
-            result = cloudinary.uploader.upload(
-                content,
-                folder=folder,
-                resource_type="image",
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                partial(
+                    cloudinary.uploader.upload,
+                    content,
+                    folder=folder,
+                    resource_type="image"
+                )
             )
             url = result.get("secure_url", "")
             logger.info("Uploaded to Cloudinary: %s", url)

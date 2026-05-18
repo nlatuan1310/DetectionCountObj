@@ -1,5 +1,5 @@
 ---
-trigger: always_on
+trigger: model_decision
 ---
 
 # Cấu trúc Thư mục Backend (FastAPI + YOLO)

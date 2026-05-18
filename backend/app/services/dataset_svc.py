@@ -1,11 +1,21 @@
 import logging
+import os
+import shutil
+import base64
+import cv2
+import numpy as np
+import albumentations as A
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Sequence
 
+from sklearn.model_selection import train_test_split
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Project, Class, Image, Annotation, DatasetVersion
+from app.db.models import Project, Class, Image, Annotation, DatasetVersion, DatasetVersionImage
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -18,39 +28,45 @@ class DatasetService:
     @staticmethod
     async def list_projects(db: AsyncSession) -> list[dict]:
         """Lấy danh sách projects kèm thống kê."""
+        # Subquery đếm tổng số ảnh
+        subq_images = (
+            select(Image.project_id, func.count(Image.id).label("image_count"))
+            .group_by(Image.project_id)
+            .subquery()
+        )
+
+        # Subquery đếm số ảnh đã được gán nhãn
+        subq_annotated = (
+            select(Image.project_id, func.count(func.distinct(Image.id)).label("annotated_count"))
+            .join(Annotation, Annotation.image_id == Image.id)
+            .group_by(Image.project_id)
+            .subquery()
+        )
+
         stmt = (
             select(
                 Project,
-                func.count(Image.id).label("image_count"),
+                func.coalesce(subq_images.c.image_count, 0).label("image_count"),
+                func.coalesce(subq_annotated.c.annotated_count, 0).label("annotated_count"),
             )
-            .outerjoin(Image, Image.project_id == Project.id)
-            .group_by(Project.id)
+            .outerjoin(subq_images, Project.id == subq_images.c.project_id)
+            .outerjoin(subq_annotated, Project.id == subq_annotated.c.project_id)
             .order_by(Project.created_at.desc())
         )
         result = await db.execute(stmt)
         rows = result.all()
 
-        projects = []
-        for project, image_count in rows:
-            # Count ảnh đã có annotation
-            ann_stmt = (
-                select(func.count(func.distinct(Image.id)))
-                .join(Annotation, Annotation.image_id == Image.id)
-                .where(Image.project_id == project.id)
-            )
-            ann_result = await db.execute(ann_stmt)
-            annotated_count = ann_result.scalar() or 0
-
-            projects.append({
+        return [
+            {
                 "id": project.id,
                 "name": project.name,
                 "description": project.description,
                 "created_at": project.created_at,
                 "image_count": image_count,
                 "annotated_count": annotated_count,
-            })
-        return projects
-
+            }
+            for project, image_count, annotated_count in rows
+        ]
     @staticmethod
     async def create_project(db: AsyncSession, name: str, description: str | None = None) -> Project:
         """Tạo project mới (đợt thu thập dữ liệu)."""
@@ -389,3 +405,428 @@ class DatasetService:
         quota = max((n_new * 0.25) / k_active_classes, 50)
         quota = min(quota, 200)  # Ceiling capping
         return int(quota)
+
+    # ======================== VERSION OPERATIONS ========================
+
+    @staticmethod
+    async def get_version(db: AsyncSession, version_id: int) -> DatasetVersion | None:
+        """Lấy version theo ID."""
+        stmt = select(DatasetVersion).where(DatasetVersion.id == version_id)
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def generate_version(
+        db: AsyncSession,
+        version_id: int,
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.2,
+        test_ratio: float = 0.1,
+    ) -> DatasetVersion:
+        """
+        Thực hiện Stratified Split + sinh thư mục YOLO từ local_cache.
+        Tuân thủ MLOps rules:
+        - Tách riêng labeled images và background images
+        - Dùng stratify cho labeled, KHÔNG stratify cho background
+        - Gộp kết quả thành train/val/test
+        """
+        version = await DatasetService.get_version(db, version_id)
+        if not version:
+            raise ValueError("Version không tồn tại")
+
+        # Cập nhật status
+        version.status = "generating"
+        await db.commit()
+
+        try:
+            project_id = version.project_id
+
+            # 1. Query ảnh labeled (có ít nhất 1 annotation)
+            labeled_stmt = (
+                select(Image)
+                .join(Annotation, Annotation.image_id == Image.id)
+                .where(Image.project_id == project_id)
+                .distinct()
+            )
+            labeled_result = await db.execute(labeled_stmt)
+            labeled_images = list(labeled_result.scalars().all())
+
+            # 2. Query ảnh background
+            bg_stmt = (
+                select(Image)
+                .where(Image.project_id == project_id, Image.is_background == True)
+            )
+            bg_result = await db.execute(bg_stmt)
+            bg_images = list(bg_result.scalars().all())
+
+            total = len(labeled_images) + len(bg_images)
+            if total == 0:
+                version.status = "failed"
+                await db.commit()
+                raise ValueError("Project không có ảnh nào để generate")
+
+            # 3. Lấy dominant class cho mỗi labeled image (để stratify)
+            labeled_labels = []
+            for img in labeled_images:
+                ann_stmt = (
+                    select(Annotation.class_id)
+                    .where(Annotation.image_id == img.id)
+                    .limit(1)
+                )
+                ann_result = await db.execute(ann_stmt)
+                class_id = ann_result.scalar_one_or_none()
+                labeled_labels.append(class_id or 0)
+
+            # 4. Split labeled images (có stratify)
+            train_labeled, val_labeled, test_labeled = [], [], []
+            if len(labeled_images) >= 3:
+                # Kiểm tra mỗi class có đủ sample cho stratify không
+                from collections import Counter
+                label_counts = Counter(labeled_labels)
+                can_stratify = all(c >= 3 for c in label_counts.values())
+
+                val_test_ratio = val_ratio + test_ratio
+                stratify_arg = labeled_labels if can_stratify else None
+
+                if len(labeled_images) >= 4 and val_test_ratio > 0:
+                    train_labeled, val_test = train_test_split(
+                        labeled_images,
+                        test_size=val_test_ratio,
+                        random_state=42,
+                        stratify=stratify_arg,
+                    )
+                    # Split val_test thành val và test
+                    if test_ratio > 0 and len(val_test) >= 2:
+                        relative_test = test_ratio / val_test_ratio
+                        # Tái tạo stratify labels cho val_test
+                        if can_stratify:
+                            vt_labels = [
+                                labeled_labels[labeled_images.index(img)]
+                                for img in val_test
+                            ]
+                            vt_counts = Counter(vt_labels)
+                            vt_stratify = vt_labels if all(c >= 2 for c in vt_counts.values()) else None
+                        else:
+                            vt_stratify = None
+
+                        val_labeled, test_labeled = train_test_split(
+                            val_test,
+                            test_size=relative_test,
+                            random_state=42,
+                            stratify=vt_stratify,
+                        )
+                    else:
+                        val_labeled = val_test
+                        test_labeled = []
+                else:
+                    train_labeled = labeled_images
+            else:
+                train_labeled = labeled_images
+
+            # 5. Split background images (KHÔNG stratify — MLOps rule)
+            train_bg, val_bg, test_bg = [], [], []
+            if len(bg_images) >= 3:
+                val_test_ratio = val_ratio + test_ratio
+                if val_test_ratio > 0:
+                    train_bg, val_test_bg = train_test_split(
+                        bg_images, test_size=val_test_ratio, random_state=42
+                    )
+                    if test_ratio > 0 and len(val_test_bg) >= 2:
+                        relative_test = test_ratio / val_test_ratio
+                        val_bg, test_bg = train_test_split(
+                            val_test_bg, test_size=relative_test, random_state=42
+                        )
+                    else:
+                        val_bg = val_test_bg
+                else:
+                    train_bg = bg_images
+            elif bg_images:
+                train_bg = bg_images
+
+            # 6. Gộp kết quả
+            train_imgs = train_labeled + train_bg
+            val_imgs = val_labeled + val_bg
+            test_imgs = test_labeled + test_bg
+
+            # 7. Xóa snapshot cũ (nếu re-generate)
+            await db.execute(
+                delete(DatasetVersionImage).where(DatasetVersionImage.version_id == version_id)
+            )
+
+            # 8. Lưu snapshot vào DB
+            for img in train_imgs:
+                db.add(DatasetVersionImage(version_id=version_id, image_id=img.id, split="train"))
+            for img in val_imgs:
+                db.add(DatasetVersionImage(version_id=version_id, image_id=img.id, split="val"))
+            for img in test_imgs:
+                db.add(DatasetVersionImage(version_id=version_id, image_id=img.id, split="test"))
+
+            # 9. Sinh thư mục YOLO
+            yolo_base = Path(settings.LOCAL_CACHE_DIR).parent / "yolo_dataset" / str(version_id)
+            if yolo_base.exists():
+                shutil.rmtree(yolo_base)
+
+            # Lấy active classes để build mapping
+            classes_stmt = select(Class).where(Class.is_active == True).order_by(Class.id)
+            classes_result = await db.execute(classes_stmt)
+            active_classes = list(classes_result.scalars().all())
+            class_id_to_idx = {cls.id: idx for idx, cls in enumerate(active_classes)}
+
+            for split_name, split_imgs in [("train", train_imgs), ("val", val_imgs), ("test", test_imgs)]:
+                img_dir = yolo_base / split_name / "images"
+                lbl_dir = yolo_base / split_name / "labels"
+                img_dir.mkdir(parents=True, exist_ok=True)
+                lbl_dir.mkdir(parents=True, exist_ok=True)
+
+                for img in split_imgs:
+                    src = Path(img.local_path)
+                    if src.exists():
+                        dst = img_dir / src.name
+                        shutil.copy2(str(src), str(dst))
+
+                        # Sinh label file
+                        ann_stmt = select(Annotation).where(Annotation.image_id == img.id)
+                        ann_result = await db.execute(ann_stmt)
+                        anns = ann_result.scalars().all()
+
+                        label_path = lbl_dir / f"{src.stem}.txt"
+                        with open(label_path, "w") as f:
+                            for ann in anns:
+                                if ann.class_id in class_id_to_idx:
+                                    idx = class_id_to_idx[ann.class_id]
+                                    cx = ann.bbox_x + ann.bbox_w / 2
+                                    cy = ann.bbox_y + ann.bbox_h / 2
+                                    f.write(f"{idx} {cx:.6f} {cy:.6f} {ann.bbox_w:.6f} {ann.bbox_h:.6f}\n")
+
+            # 10. Sinh data.yaml
+            yaml_path = yolo_base / "data.yaml"
+            with open(yaml_path, "w") as f:
+                f.write(f"path: {yolo_base.resolve()}\n")
+                f.write("train: train/images\n")
+                f.write("val: val/images\n")
+                f.write("test: test/images\n\n")
+                f.write(f"nc: {len(active_classes)}\n")
+                f.write(f"names: [{', '.join(repr(c.name) for c in active_classes)}]\n")
+
+            # 11. Cập nhật version record
+            ratio_str = f"{int(train_ratio*100)}/{int(val_ratio*100)}/{int(test_ratio*100)}"
+            version.total_images = total
+            version.train_count = len(train_imgs)
+            version.val_count = len(val_imgs)
+            version.test_count = len(test_imgs)
+            version.split_ratio = ratio_str
+            version.generated_at = datetime.now(timezone.utc)
+            version.yolo_dataset_path = str(yolo_base.resolve())
+            version.status = "generated"
+
+            await db.commit()
+            await db.refresh(version)
+            logger.info(
+                "Generated version id=%d: train=%d, val=%d, test=%d",
+                version_id, len(train_imgs), len(val_imgs), len(test_imgs),
+            )
+            return version
+
+        except ValueError:
+            raise
+        except Exception as e:
+            version.status = "failed"
+            await db.commit()
+            logger.error("Generate version %d failed: %s", version_id, str(e))
+            raise
+
+    @staticmethod
+    async def get_version_detail(db: AsyncSession, version_id: int) -> dict | None:
+        """Lấy chi tiết version bao gồm class distribution."""
+        version = await DatasetService.get_version(db, version_id)
+        if not version:
+            return None
+
+        # Lấy snapshot images
+        vi_stmt = (
+            select(DatasetVersionImage)
+            .where(DatasetVersionImage.version_id == version_id)
+        )
+        vi_result = await db.execute(vi_stmt)
+        version_images = list(vi_result.scalars().all())
+
+        # Đếm labeled vs background
+        labeled_ids = set()
+        bg_ids = set()
+        for vi in version_images:
+            img_stmt = select(Image).where(Image.id == vi.image_id)
+            img_result = await db.execute(img_stmt)
+            img = img_result.scalar_one_or_none()
+            if img and img.is_background:
+                bg_ids.add(vi.image_id)
+            else:
+                labeled_ids.add(vi.image_id)
+
+        # Tính class distribution
+        class_dist = {}
+        for vi in version_images:
+            if vi.image_id in bg_ids:
+                continue
+            ann_stmt = (
+                select(Annotation.class_id, Class.name)
+                .join(Class, Annotation.class_id == Class.id)
+                .where(Annotation.image_id == vi.image_id)
+            )
+            ann_result = await db.execute(ann_stmt)
+            for class_id, class_name in ann_result.all():
+                if class_id not in class_dist:
+                    class_dist[class_id] = {
+                        "class_id": class_id,
+                        "class_name": class_name,
+                        "train": 0, "val": 0, "test": 0, "total": 0,
+                    }
+                class_dist[class_id][vi.split] += 1
+                class_dist[class_id]["total"] += 1
+
+        return {
+            "id": version.id,
+            "project_id": version.project_id,
+            "version_name": version.version_name,
+            "augmentation_config": version.augmentation_config or {},
+            "status": version.status,
+            "created_at": version.created_at,
+            "total_images": version.total_images,
+            "train_count": version.train_count,
+            "val_count": version.val_count,
+            "test_count": version.test_count,
+            "split_ratio": version.split_ratio,
+            "generated_at": version.generated_at,
+            "yolo_dataset_path": version.yolo_dataset_path,
+            "class_distribution": list(class_dist.values()),
+            "labeled_count": len(labeled_ids),
+            "background_count": len(bg_ids),
+        }
+
+    @staticmethod
+    async def delete_version(db: AsyncSession, version_id: int) -> bool:
+        """Xóa version + cleanup thư mục YOLO vật lý."""
+        version = await DatasetService.get_version(db, version_id)
+        if not version:
+            return False
+
+        # Cleanup thư mục YOLO
+        if version.yolo_dataset_path:
+            yolo_path = Path(version.yolo_dataset_path)
+            if yolo_path.exists():
+                shutil.rmtree(yolo_path)
+                logger.info("Cleaned up YOLO dir: %s", yolo_path)
+
+        await db.delete(version)
+        await db.commit()
+        logger.info("Deleted version id=%d", version_id)
+        return True
+
+    @staticmethod
+    async def preview_augmentation(
+        db: AsyncSession, project_id: int, augmentation_config: dict
+    ) -> str | None:
+        """
+        Lấy ngẫu nhiên 1 ảnh (có annotation) trong project, áp dụng augmentation config
+        và trả về ảnh kèm bounding box dưới dạng base64 string.
+        """
+        # 1. Query random labeled image
+        stmt = (
+            select(Image)
+            .join(Annotation, Annotation.image_id == Image.id)
+            .where(Image.project_id == project_id)
+            .order_by(func.random())
+            .limit(1)
+        )
+        result = await db.execute(stmt)
+        image = result.scalar_one_or_none()
+
+        if not image:
+            # Fallback to any image if no labeled image
+            stmt = select(Image).where(Image.project_id == project_id).order_by(func.random()).limit(1)
+            result = await db.execute(stmt)
+            image = result.scalar_one_or_none()
+
+        if not image or not os.path.exists(image.local_path):
+            return None
+
+        # 2. Get annotations
+        ann_stmt = (
+            select(Annotation, Class.name)
+            .join(Class, Annotation.class_id == Class.id)
+            .where(Annotation.image_id == image.id)
+        )
+        ann_result = await db.execute(ann_stmt)
+        annotations = ann_result.all()
+
+        # 3. Read image
+        img_arr = cv2.imread(image.local_path)
+        if img_arr is None:
+            return None
+        img_arr = cv2.cvtColor(img_arr, cv2.COLOR_BGR2RGB)
+        h, w, _ = img_arr.shape
+
+        # 4. Prepare bboxes [x_min, y_min, x_max, y_max, class_name]
+        bboxes = []
+        for ann, class_name in annotations:
+            x_min = max(0.0, ann.bbox_x)
+            y_min = max(0.0, ann.bbox_y)
+            x_max = min(1.0, ann.bbox_x + ann.bbox_w)
+            y_max = min(1.0, ann.bbox_y + ann.bbox_h)
+            
+            # Đảm bảo box hợp lệ cho albumentations
+            if x_max > x_min and y_max > y_min:
+                bboxes.append([x_min, y_min, x_max, y_max, class_name])
+
+        # 5. Build albumentations transforms
+        transforms = []
+        if augmentation_config.get("horizontal_flip"):
+            transforms.append(A.HorizontalFlip(p=1.0))
+        if augmentation_config.get("vertical_flip"):
+            transforms.append(A.VerticalFlip(p=1.0))
+        if augmentation_config.get("safe_rotate"):
+            transforms.append(A.SafeRotate(limit=15, p=1.0))
+        if augmentation_config.get("brightness_contrast"):
+            transforms.append(A.RandomBrightnessContrast(p=1.0))
+        if augmentation_config.get("blur"):
+            transforms.append(A.GaussianBlur(blur_limit=(3, 5), p=1.0))
+        if augmentation_config.get("gaussian_noise"):
+            transforms.append(A.GaussNoise(var_limit=(10.0, 50.0), p=1.0))
+
+        if transforms:
+            transform = A.Compose(
+                transforms,
+                bbox_params=A.BboxParams(format='albumentations', min_area=0, min_visibility=0, label_fields=['class_labels'])
+            )
+            class_labels = [b[4] for b in bboxes]
+            bboxes_only = [b[:4] for b in bboxes]
+
+            try:
+                transformed = transform(image=img_arr, bboxes=bboxes_only, class_labels=class_labels)
+                out_img = transformed['image']
+                out_bboxes = transformed['bboxes']
+                out_labels = transformed['class_labels']
+            except Exception as e:
+                logger.error("Augmentation failed: %s", str(e))
+                out_img = img_arr
+                out_bboxes = bboxes_only
+                out_labels = class_labels
+        else:
+            out_img = img_arr
+            out_bboxes = [b[:4] for b in bboxes]
+            out_labels = [b[4] for b in bboxes]
+
+        # 6. Draw bboxes
+        out_img_bgr = cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
+        for bbox, label in zip(out_bboxes, out_labels):
+            x_min = int(bbox[0] * w)
+            y_min = int(bbox[1] * h)
+            x_max = int(bbox[2] * w)
+            y_max = int(bbox[3] * h)
+            cv2.rectangle(out_img_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+            cv2.putText(out_img_bgr, label, (x_min, max(0, y_min - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        # 7. Encode base64
+        _, buffer = cv2.imencode('.jpg', out_img_bgr)
+        base64_str = base64.b64encode(buffer).decode('utf-8')
+        return base64_str
+

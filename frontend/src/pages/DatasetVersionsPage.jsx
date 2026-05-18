@@ -1,10 +1,17 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Layers, Clock, Loader2 } from 'lucide-react';
+import { ArrowLeft, Layers, Loader2 } from 'lucide-react';
 import { cn } from '../utils/cn';
 import AugmentationConfigForm from '../components/Dataset/AugmentationConfigForm';
+import VersionCard from '../components/Dataset/VersionCard';
+import VersionDetailModal from '../components/Dataset/VersionDetailModal';
 import { getProject } from '../services/project_service';
-import apiClient from '../services/apiClient';
+import {
+  listVersions,
+  createVersion,
+  generateVersion,
+  deleteVersion,
+} from '../services/dataset_version_service';
 
 const DatasetVersionsPage = () => {
   const { projectId } = useParams();
@@ -15,17 +22,23 @@ const DatasetVersionsPage = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [generatingId, setGeneratingId] = useState(null);
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
+
+  // Detail modal state
+  const [detailModalOpen, setDetailModalOpen] = useState(false);
+  const [detailVersionId, setDetailVersionId] = useState(null);
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const [projectData, versionsRes] = await Promise.all([
+      const [projectData, versionsData] = await Promise.all([
         getProject(projectId),
-        apiClient.get(`/projects/${projectId}/versions`),
+        listVersions(projectId),
       ]);
       setProject(projectData);
-      setVersions(versionsRes.data);
+      setVersions(versionsData);
     } catch (err) {
       setError('Không thể tải dữ liệu');
     } finally {
@@ -39,10 +52,8 @@ const DatasetVersionsPage = () => {
 
   const handleCreateVersion = async ({ version_name, augmentation_config }) => {
     try {
-      await apiClient.post(`/projects/${projectId}/versions`, {
-        version_name,
-        augmentation_config,
-      });
+      setError(null);
+      await createVersion(projectId, { version_name, augmentation_config });
       setShowCreate(false);
       await fetchData();
     } catch (err) {
@@ -50,17 +61,35 @@ const DatasetVersionsPage = () => {
     }
   };
 
-  const formatDate = (dateStr) => {
-    if (!dateStr) return '';
-    return new Date(dateStr).toLocaleString('vi-VN', {
-      day: '2-digit', month: '2-digit', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
-    });
+  const handleGenerate = async (version) => {
+    setGeneratingId(version.id);
+    setError(null);
+    try {
+      await generateVersion(projectId, version.id);
+      await fetchData();
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Generate thất bại');
+      await fetchData();
+    } finally {
+      setGeneratingId(null);
+    }
   };
 
-  const statusColors = {
-    draft: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
-    generated: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+  const handleViewDetail = (version) => {
+    setDetailVersionId(version.id);
+    setDetailModalOpen(true);
+  };
+
+  const handleDelete = async () => {
+    if (!deleteConfirm) return;
+    try {
+      setError(null);
+      await deleteVersion(projectId, deleteConfirm.id);
+      setDeleteConfirm(null);
+      await fetchData();
+    } catch (err) {
+      setError('Xóa version thất bại');
+    }
   };
 
   if (isLoading) {
@@ -111,7 +140,7 @@ const DatasetVersionsPage = () => {
       {showCreate && (
         <div className="bg-slate-800/40 backdrop-blur-md border border-slate-700/50 rounded-2xl p-5">
           <h3 className="text-sm font-semibold text-slate-200 mb-4">Tạo Version Mới</h3>
-          <AugmentationConfigForm onSubmit={handleCreateVersion} />
+          <AugmentationConfigForm onSubmit={handleCreateVersion} projectId={projectId} />
         </div>
       )}
 
@@ -119,60 +148,14 @@ const DatasetVersionsPage = () => {
       {versions.length > 0 ? (
         <div className="space-y-3">
           {versions.map((ver) => (
-            <div
+            <VersionCard
               key={ver.id}
-              className={cn(
-                'bg-slate-800/40 backdrop-blur-md border border-slate-700/50 rounded-2xl p-5',
-                'hover:border-slate-600/50 transition-all duration-200'
-              )}
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-blue-500/10">
-                    <Layers size={18} className="text-blue-400" />
-                  </div>
-                  <div>
-                    <h4 className="font-semibold text-slate-200">
-                      {ver.version_name || `Version ${ver.id}`}
-                    </h4>
-                    <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-400">
-                      <Clock size={12} />
-                      {formatDate(ver.created_at)}
-                    </div>
-                  </div>
-                </div>
-
-                <span
-                  className={cn(
-                    'px-3 py-1 text-xs font-semibold rounded-full border',
-                    statusColors[ver.status] || statusColors.draft
-                  )}
-                >
-                  {ver.status === 'draft' ? 'Bản nháp' : 'Đã sinh'}
-                </span>
-              </div>
-
-              {/* Augmentation config summary */}
-              {ver.augmentation_config && Object.keys(ver.augmentation_config).length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-1.5">
-                  {Object.entries(ver.augmentation_config)
-                    .filter(([key, val]) => val === true)
-                    .map(([key]) => (
-                      <span
-                        key={key}
-                        className="px-2 py-0.5 text-[10px] rounded-full bg-slate-700/50 text-slate-300 border border-slate-600/30"
-                      >
-                        {key.replace(/_/g, ' ')}
-                      </span>
-                    ))}
-                  {ver.augmentation_config.multiplier && (
-                    <span className="px-2 py-0.5 text-[10px] rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                      {ver.augmentation_config.multiplier}x
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
+              version={ver}
+              onGenerate={handleGenerate}
+              onViewDetail={handleViewDetail}
+              onDelete={(v) => setDeleteConfirm(v)}
+              isGenerating={generatingId === ver.id}
+            />
           ))}
         </div>
       ) : (
@@ -181,10 +164,49 @@ const DatasetVersionsPage = () => {
             <Layers size={48} className="mb-3 text-slate-600" />
             <p className="text-sm">Chưa có version nào</p>
             <p className="text-xs text-slate-600 mt-1">
-              Tạo version mới để cấu hình Augmentation
+              Tạo version mới để cấu hình Augmentation và sinh dataset
             </p>
           </div>
         )
+      )}
+
+      {/* Detail Modal */}
+      <VersionDetailModal
+        isOpen={detailModalOpen}
+        onClose={() => setDetailModalOpen(false)}
+        projectId={parseInt(projectId)}
+        versionId={detailVersionId}
+      />
+
+      {/* Delete Confirmation */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => setDeleteConfirm(null)}
+          />
+          <div className="relative bg-slate-900/95 border border-slate-700/50 rounded-2xl p-6 max-w-md mx-4 space-y-4">
+            <h3 className="text-lg font-semibold text-white">Xóa Version?</h3>
+            <p className="text-sm text-slate-400">
+              Xóa <strong>{deleteConfirm.version_name || `Version ${deleteConfirm.id}`}</strong> sẽ
+              xóa cả thư mục YOLO đã sinh. Không thể hoàn tác.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setDeleteConfirm(null)}
+                className="px-4 py-2 text-sm text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={handleDelete}
+                className="px-4 py-2 text-sm bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 border border-red-500/20 transition-colors"
+              >
+                Xóa vĩnh viễn
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

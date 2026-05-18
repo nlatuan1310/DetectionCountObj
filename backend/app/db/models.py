@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, Float, ForeignKey, JSON, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, Float, ForeignKey, JSON, DateTime, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.database import Base
@@ -63,11 +63,40 @@ class DatasetVersion(Base):
     project_id = Column(Integer, ForeignKey("projects.id"))
     version_name = Column(String, nullable=True)
     augmentation_config = Column(JSON)
-    status = Column(String, default="draft")  # draft | generated
+    status = Column(String, default="draft")  # draft | generating | generated | failed
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Thống kê split
+    total_images = Column(Integer, default=0)
+    train_count = Column(Integer, default=0)
+    val_count = Column(Integer, default=0)
+    test_count = Column(Integer, default=0)
+    split_ratio = Column(String, default="70/20/10")
+    generated_at = Column(DateTime(timezone=True), nullable=True)
+    yolo_dataset_path = Column(String, nullable=True)  # Đường dẫn thư mục YOLO output
 
     # Relationships
     project = relationship("Project", back_populates="dataset_versions")
+    version_images = relationship(
+        "DatasetVersionImage", back_populates="version", cascade="all, delete-orphan"
+    )
+
+
+class DatasetVersionImage(Base):
+    """Bảng snapshot trung gian: track ảnh nào thuộc version nào + split assignment."""
+    __tablename__ = "dataset_version_images"
+    __table_args__ = (
+        UniqueConstraint("version_id", "image_id", name="uq_version_image"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    version_id = Column(Integer, ForeignKey("dataset_versions.id", ondelete="CASCADE"), index=True)
+    image_id = Column(Integer, ForeignKey("images.id", ondelete="CASCADE"), index=True)
+    split = Column(String, nullable=False)  # "train" | "val" | "test"
+
+    # Relationships
+    version = relationship("DatasetVersion", back_populates="version_images")
+    image = relationship("Image")
 
 
 class Model(Base):
