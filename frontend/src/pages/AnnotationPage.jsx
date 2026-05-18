@@ -6,7 +6,7 @@ import GlowButton from '../components/ui/GlowButton';
 import AnnotationCanvas from '../components/Dataset/AnnotationCanvas';
 import ClassBadge from '../components/Dataset/ClassBadge';
 import { getProjectImages } from '../services/image_service';
-import { getAnnotations, createAnnotations, deleteAnnotation } from '../services/annotation_service';
+import { getAnnotations, createAnnotations, deleteAnnotation, updateAnnotation } from '../services/annotation_service';
 import { getClasses, createClass, deleteClass } from '../services/class_service';
 
 const AnnotationPage = () => {
@@ -23,6 +23,11 @@ const AnnotationPage = () => {
   const [pendingAnnotations, setPendingAnnotations] = useState([]);
   const [focusedAnnotationId, setFocusedAnnotationId] = useState(null);
   const [error, setError] = useState(null);
+  
+  // Custom Delete Modal states
+  const [classToDelete, setClassToDelete] = useState(null);
+  const [annotationToDelete, setAnnotationToDelete] = useState(null);
+  const [classInUseError, setClassInUseError] = useState(null);
 
   const currentImage = images[currentImageIndex] || null;
 
@@ -107,39 +112,92 @@ const AnnotationPage = () => {
     ]);
   };
 
-  const handleAnnotationDelete = async (annotationId) => {
-    // Check nếu là pending (chưa lưu)
+  const handleAnnotationUpdate = async (annotationId, newData) => {
+    let classId = newData.class_id;
+    let finalClassName = newData.className;
+
+    if (!classId && finalClassName) {
+      const existing = classes.find((c) => c.name.toLowerCase() === finalClassName.toLowerCase());
+      if (existing) {
+        classId = existing.id;
+      } else {
+        try {
+          const newClass = await createClass({ name: finalClassName });
+          setClasses((prev) => [...prev, newClass]);
+          classId = newClass.id;
+        } catch (err) {
+          setError('Lỗi khi tạo class mới');
+          return;
+        }
+      }
+    }
+
+    const updates = { ...newData };
+    if (classId) {
+      updates.class_id = classId;
+      updates.class_name = finalClassName || classes.find((c) => c.id === classId)?.name;
+    }
+    delete updates.className;
+
     if (typeof annotationId === 'string' && annotationId.startsWith('pending_')) {
       const idx = parseInt(annotationId.replace('pending_', ''));
+      setPendingAnnotations(prev => prev.map((ann, i) => i === idx ? { ...ann, ...updates } : ann));
+    } else {
+      try {
+        await updateAnnotation(annotationId, updates);
+        await loadAnnotations();
+      } catch (err) {
+        setError('Cập nhật annotation thất bại');
+      }
+    }
+  };
+
+  const requestAnnotationDelete = (annotationId, e) => {
+    if (e) e.stopPropagation();
+    setAnnotationToDelete(annotationId);
+  };
+
+  const confirmAnnotationDelete = async () => {
+    if (!annotationToDelete) return;
+
+    if (typeof annotationToDelete === 'string' && annotationToDelete.startsWith('pending_')) {
+      const idx = parseInt(annotationToDelete.replace('pending_', ''));
       setPendingAnnotations((prev) => prev.filter((_, i) => i !== idx));
+      setAnnotationToDelete(null);
       return;
     }
 
     try {
-      await deleteAnnotation(annotationId);
+      await deleteAnnotation(annotationToDelete);
       await loadAnnotations();
     } catch (err) {
       setError('Xóa annotation thất bại');
     }
+    setAnnotationToDelete(null);
   };
 
-  const handleClassDelete = async (cls, e) => {
+  const requestClassDelete = (cls, e) => {
     e.stopPropagation();
     
     const isUsedInCurrent = allAnnotations.some(a => a.class_id === cls.id);
     if (isUsedInCurrent || cls.annotation_count > 0) {
-      window.alert(`Class "${cls.name}" đang được sử dụng (có annotations). Không thể xóa!`);
+      setClassInUseError(cls);
       return;
     }
 
-    if (window.confirm(`Bạn có chắc chắn muốn xóa class "${cls.name}" không?`)) {
-      try {
-        await deleteClass(cls.id);
-        setClasses(prev => prev.filter(c => c.id !== cls.id));
-        if (selectedClassId === cls.id) setSelectedClassId(null);
-      } catch (err) {
-        window.alert(err.response?.data?.detail || 'Xóa class thất bại');
-      }
+    setClassToDelete(cls);
+  };
+
+  const confirmClassDelete = async () => {
+    if (!classToDelete) return;
+    try {
+      await deleteClass(classToDelete.id);
+      setClasses(prev => prev.filter(c => c.id !== classToDelete.id));
+      if (selectedClassId === classToDelete.id) setSelectedClassId(null);
+      setClassToDelete(null);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Xóa class thất bại');
+      setClassToDelete(null);
     }
   };
 
@@ -162,12 +220,16 @@ const AnnotationPage = () => {
     if (newIndex >= 0 && newIndex < images.length) {
       setCurrentImageIndex(newIndex);
       setPendingAnnotations([]);
+      setFocusedAnnotationId(null);
     }
   };
 
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
+      // Bỏ phím arrow/A/D để tránh nhảy ảnh khi đang gõ text trong thẻ input (popup)
+      if (document.activeElement.tagName === 'INPUT') return;
+      
       if (e.key === 'ArrowLeft' || e.key === 'a') goToImage(-1);
       if (e.key === 'ArrowRight' || e.key === 'd') goToImage(1);
       if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
@@ -201,7 +263,7 @@ const AnnotationPage = () => {
   }
 
   return (
-    <div className="flex flex-col h-full gap-4">
+    <div className="flex flex-col h-full gap-4 relative">
       {/* Top bar */}
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
@@ -271,7 +333,9 @@ const AnnotationPage = () => {
             focusedAnnotationId={focusedAnnotationId}
             classes={classes}
             onAnnotationCreate={handleAnnotationCreate}
-            onAnnotationDelete={handleAnnotationDelete}
+            onAnnotationDelete={requestAnnotationDelete}
+            onAnnotationUpdate={handleAnnotationUpdate}
+            onAnnotationFocus={setFocusedAnnotationId}
           />
         </div>
 
@@ -296,7 +360,7 @@ const AnnotationPage = () => {
                 >
                   <ClassBadge name={cls.name} classId={cls.id} isActive={cls.is_active} />
                   <button
-                    onClick={(e) => handleClassDelete(cls, e)}
+                    onClick={(e) => requestClassDelete(cls, e)}
                     className="opacity-0 group-hover:opacity-100 p-1 text-slate-500 hover:text-red-400 transition-colors rounded"
                     title="Xóa class"
                   >
@@ -336,7 +400,7 @@ const AnnotationPage = () => {
                     />
                   </div>
                   <button
-                    onClick={() => handleAnnotationDelete(ann.id)}
+                    onClick={(e) => requestAnnotationDelete(ann.id, e)}
                     className="text-slate-500 hover:text-red-400 transition-colors p-1"
                     title="Xóa"
                   >
@@ -353,6 +417,78 @@ const AnnotationPage = () => {
           </div>
         </div>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      {classToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-slate-800 border border-slate-700 p-5 rounded-xl shadow-2xl w-80">
+            <h3 className="text-white font-semibold text-base mb-2">Xác nhận xóa Class</h3>
+            <p className="text-slate-300 text-sm mb-5">
+              Bạn có chắc chắn muốn xóa class <span className="font-bold text-red-400">"{classToDelete.name}"</span> không? Hành động này không thể hoàn tác.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button 
+                onClick={() => setClassToDelete(null)}
+                className="px-4 py-2 text-sm text-slate-300 hover:bg-slate-700 rounded-lg transition-colors"
+              >
+                Hủy
+              </button>
+              <button 
+                onClick={confirmClassDelete}
+                className="px-4 py-2 text-sm bg-red-500/20 text-red-400 hover:bg-red-500/30 hover:text-red-300 rounded-lg transition-colors border border-red-500/30"
+              >
+                Xóa
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Annotation Confirmation Modal */}
+      {annotationToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-slate-800 border border-slate-700 p-5 rounded-xl shadow-2xl w-80">
+            <h3 className="text-white font-semibold text-base mb-2">Xác nhận xóa Box</h3>
+            <p className="text-slate-300 text-sm mb-5">
+              Bạn có chắc chắn muốn xóa bounding box này không? Hành động này không thể hoàn tác.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button 
+                onClick={() => setAnnotationToDelete(null)}
+                className="px-4 py-2 text-sm text-slate-300 hover:bg-slate-700 rounded-lg transition-colors"
+              >
+                Hủy
+              </button>
+              <button 
+                onClick={confirmAnnotationDelete}
+                className="px-4 py-2 text-sm bg-red-500/20 text-red-400 hover:bg-red-500/30 hover:text-red-300 rounded-lg transition-colors border border-red-500/30"
+              >
+                Xóa
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Class in Use Warning Modal */}
+      {classInUseError && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-slate-800 border border-slate-700 p-5 rounded-xl shadow-2xl w-80">
+            <h3 className="text-white font-semibold text-base mb-2">Không thể xóa Class</h3>
+            <p className="text-slate-300 text-sm mb-5">
+              Class <span className="font-bold text-blue-400">"{classInUseError.name}"</span> đang được sử dụng cho một số bounding box. Bạn cần xóa các box đó trước khi có thể xóa class này.
+            </p>
+            <div className="flex justify-end">
+              <button 
+                onClick={() => setClassInUseError(null)}
+                className="px-4 py-2 text-sm bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 hover:text-blue-300 rounded-lg transition-colors border border-blue-500/30 font-medium"
+              >
+                Đã hiểu
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

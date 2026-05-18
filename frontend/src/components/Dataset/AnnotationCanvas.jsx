@@ -1,9 +1,10 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { cn } from '../../utils/cn';
 import { getClassColor } from '../../utils/colors';
+import { MousePointer2, Hand, X } from 'lucide-react';
 
 /**
- * AnnotationCanvas — Canvas HTML5 để vẽ bounding box annotation giống Roboflow.
+ * AnnotationCanvas — Canvas HTML5 để vẽ bounding box annotation.
  */
 const AnnotationCanvas = ({
   imageUrl,
@@ -14,6 +15,7 @@ const AnnotationCanvas = ({
   onAnnotationCreate,
   onAnnotationDelete,
   onAnnotationUpdate,
+  onAnnotationFocus,
   readOnly = false,
 }) => {
   const containerRef = useRef(null);
@@ -21,23 +23,34 @@ const AnnotationCanvas = ({
   const imageRef = useRef(null);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [imageDimensions, setImageDimensions] = useState({ width: 0, height: 0 });
-  const [drawing, setDrawing] = useState(false);
-  const [startPoint, setStartPoint] = useState(null);
-  const [currentPoint, setCurrentPoint] = useState(null);
-  const [mousePos, setMousePos] = useState(null);
-  const [hoveredAnnotation, setHoveredAnnotation] = useState(null);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+
+  // Tool Modes
+  const [interactionMode, setInteractionMode] = useState('draw'); // 'draw' | 'pan'
 
   // Zoom & Pan states
   const [viewportZoom, setViewportZoom] = useState(1);
   const [viewportPan, setViewportPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState(null);
   const [isSpaceDown, setIsSpaceDown] = useState(false);
 
-  // State cho inline class popup
+  // Common UI states
+  const [mousePos, setMousePos] = useState(null);
+  const [hoveredAnnotation, setHoveredAnnotation] = useState(null);
+
+  // Draw Mode states
+  const [drawing, setDrawing] = useState(false);
+  const [startPoint, setStartPoint] = useState(null);
+  const [currentPoint, setCurrentPoint] = useState(null);
   const [draftBox, setDraftBox] = useState(null);
   const [searchText, setSearchText] = useState('');
+
+  // Resize/Edit states (Hand Mode)
+  const [resizing, setResizing] = useState(null); // { annId, handle, startPos, startRect }
+  const [editingBox, setEditingBox] = useState(null); // { ann, canvasRect }
+  const [editSearchText, setEditSearchText] = useState('');
 
   const getClassName = useCallback((classId) => {
     const cls = classes.find((c) => c.id === classId);
@@ -71,7 +84,6 @@ const AnnotationCanvas = ({
     setViewportPan({ x: 0, y: 0 });
   }, []);
 
-  // Load ảnh
   useEffect(() => {
     if (!imageUrl) return;
     setImageLoaded(false);
@@ -85,7 +97,6 @@ const AnnotationCanvas = ({
     img.src = imageUrl;
   }, [imageUrl, calculateFit]);
 
-  // Resize observer
   useEffect(() => {
     if (!containerRef.current) return;
     const observer = new ResizeObserver(() => {
@@ -95,7 +106,6 @@ const AnnotationCanvas = ({
     return () => observer.disconnect();
   }, [imageLoaded, calculateFit]);
 
-  // Chuyển đổi tọa độ canvas → YOLO normalized
   const canvasToYolo = useCallback((x1, y1, x2, y2) => {
     const imgW = imageDimensions.width;
     const imgH = imageDimensions.height;
@@ -125,7 +135,6 @@ const AnnotationCanvas = ({
     };
   }, [imageDimensions, scale, offset, viewportZoom, viewportPan]);
 
-  // Chuyển đổi YOLO → canvas coords
   const yoloToCanvas = useCallback((bbox) => {
     const imgW = imageDimensions.width;
     const imgH = imageDimensions.height;
@@ -140,6 +149,27 @@ const AnnotationCanvas = ({
 
     return { x, y, w, h };
   }, [imageDimensions, scale, offset, viewportZoom, viewportPan]);
+
+  const getHandleAtPos = useCallback((x, y, rect) => {
+    const s = 6;
+    if (Math.abs(x - rect.x) <= s && Math.abs(y - rect.y) <= s) return 'nw';
+    if (Math.abs(x - (rect.x + rect.w)) <= s && Math.abs(y - rect.y) <= s) return 'ne';
+    if (Math.abs(x - rect.x) <= s && Math.abs(y - (rect.y + rect.h)) <= s) return 'sw';
+    if (Math.abs(x - (rect.x + rect.w)) <= s && Math.abs(y - (rect.y + rect.h)) <= s) return 'se';
+    if (Math.abs(x - rect.x) <= s && y > rect.y && y < rect.y + rect.h) return 'w';
+    if (Math.abs(x - (rect.x + rect.w)) <= s && y > rect.y && y < rect.y + rect.h) return 'e';
+    if (Math.abs(y - rect.y) <= s && x > rect.x && x < rect.x + rect.w) return 'n';
+    if (Math.abs(y - (rect.y + rect.h)) <= s && x > rect.x && x < rect.x + rect.w) return 's';
+    return null;
+  }, []);
+
+  const currentAnnotations = resizing ? annotations.filter(a => a.id !== resizing.annId) : annotations;
+  let activeAnnId = null;
+  if (interactionMode === 'pan') {
+    activeAnnId = hoveredAnnotation || focusedAnnotationId;
+  } else {
+    activeAnnId = focusedAnnotationId;
+  }
 
   // Vẽ canvas
   const draw = useCallback(() => {
@@ -169,7 +199,7 @@ const AnnotationCanvas = ({
 
     ctx.drawImage(img, effOffsetX, effOffsetY, renderW, renderH);
 
-    // Vẽ draftBox (đang chờ chọn class)
+    // Vẽ draftBox (đang chờ chọn class lúc vẽ)
     if (draftBox && !drawing) {
       const { x, y, w, h } = draftBox.canvasRect;
       ctx.strokeStyle = '#ffffff';
@@ -179,25 +209,29 @@ const AnnotationCanvas = ({
       ctx.setLineDash([]);
     }
 
-    const drawAnnotation = (ann, forceHover = false) => {
-      const annRect = yoloToCanvas(ann);
+    const drawAnnotation = (ann, forceHover = false, customRect = null) => {
+      const annRect = customRect || yoloToCanvas(ann);
       const color = getClassColor(ann.class_id);
-      const isHovered = forceHover || hoveredAnnotation === ann.id;
+      const isHovered = forceHover || activeAnnId === ann.id;
 
       ctx.strokeStyle = color;
       ctx.lineWidth = isHovered ? 2.5 : 2;
       ctx.strokeRect(annRect.x, annRect.y, annRect.w, annRect.h);
 
-      if (isHovered && !drawing) {
-        const handleSize = 6;
+      if (isHovered && interactionMode === 'pan' && !resizing) {
+        const handleSize = 8;
         ctx.fillStyle = color;
-        const corners = [
+        const pts = [
           { x: annRect.x, y: annRect.y },
           { x: annRect.x + annRect.w, y: annRect.y },
           { x: annRect.x, y: annRect.y + annRect.h },
           { x: annRect.x + annRect.w, y: annRect.y + annRect.h },
+          { x: annRect.x + annRect.w / 2, y: annRect.y },
+          { x: annRect.x + annRect.w / 2, y: annRect.y + annRect.h },
+          { x: annRect.x, y: annRect.y + annRect.h / 2 },
+          { x: annRect.x + annRect.w, y: annRect.y + annRect.h / 2 },
         ];
-        corners.forEach(c => {
+        pts.forEach(c => {
           ctx.fillRect(c.x - handleSize/2, c.y - handleSize/2, handleSize, handleSize);
         });
       }
@@ -222,34 +256,32 @@ const AnnotationCanvas = ({
       ctx.shadowBlur = 0;
     };
 
-    // Vẽ các annotation KHÔNG focus trước
-    annotations.forEach((ann) => {
-      if (ann.id !== focusedAnnotationId) {
+    // Vẽ các annotation không focus trước
+    currentAnnotations.forEach((ann) => {
+      if (ann.id !== activeAnnId) {
         drawAnnotation(ann);
       }
     });
 
-    // Vẽ hiệu ứng dimming và annotation đang focus
-    if (focusedAnnotationId) {
-      const focusedAnn = annotations.find(a => a.id === focusedAnnotationId);
-      if (focusedAnn) {
-        const rect = yoloToCanvas(focusedAnn);
+    // Dimming effect và vẽ annotation focus/hovered lên trên
+    if (activeAnnId || resizing) {
+      const focusTarget = resizing ? annotations.find(a => a.id === resizing.annId) : annotations.find(a => a.id === activeAnnId);
+      
+      if (focusTarget) {
+        const rect = resizing ? resizing.currentRect : yoloToCanvas(focusTarget);
         
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
         ctx.beginPath();
-        // Rect bao quanh toàn bộ ảnh
         ctx.rect(effOffsetX, effOffsetY, renderW, renderH);
-        // Rect khoét lỗ cho annotation
         ctx.rect(rect.x, rect.y, rect.w, rect.h);
         ctx.fill('evenodd');
 
-        // Vẽ lại annotation đang focus lên trên cùng (giữ nguyên màu fill mặc định)
-        drawAnnotation(focusedAnn, false);
+        drawAnnotation(focusTarget, true, rect);
       }
     }
 
     if (drawing && startPoint && currentPoint) {
-      const color = selectedClassId ? getClassColor(selectedClassId) : '#ffffff';
+      const color = '#ffffff';
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       
@@ -272,8 +304,9 @@ const AnnotationCanvas = ({
       ctx.fillText(sizeText, x + 6, badgeY + 14);
     }
 
-    if (mousePos && !readOnly && !draftBox) {
-      const color = drawing ? (selectedClassId ? getClassColor(selectedClassId) : '#ffffff') : 'rgba(255, 255, 255, 1)';
+    // Crosshair (Draw mode only)
+    if (mousePos && !readOnly && interactionMode === 'draw' && !draftBox) {
+      const color = '#ffffff';
       ctx.strokeStyle = color;
       ctx.lineWidth = drawing ? 1 : 1.5;
       ctx.setLineDash(drawing ? [2, 2] : [4, 4]);
@@ -294,13 +327,12 @@ const AnnotationCanvas = ({
         ctx.lineTo(imgRight, mousePos.y);
         ctx.stroke();
       }
-
       ctx.setLineDash([]);
     }
   }, [
-    imageLoaded, imageDimensions, scale, offset, annotations, viewportZoom, viewportPan,
-    drawing, startPoint, currentPoint, mousePos, hoveredAnnotation,
-    selectedClassId, draftBox, focusedAnnotationId, yoloToCanvas, getClassColor, getClassName, readOnly
+    imageLoaded, imageDimensions, scale, offset, currentAnnotations, viewportZoom, viewportPan,
+    drawing, startPoint, currentPoint, mousePos, hoveredAnnotation, focusedAnnotationId,
+    selectedClassId, draftBox, yoloToCanvas, getClassColor, getClassName, readOnly, interactionMode, activeAnnId, resizing, annotations
   ]);
 
   useEffect(() => {
@@ -316,7 +348,7 @@ const AnnotationCanvas = ({
 
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.code === 'Space' && !draftBox && document.activeElement.tagName !== 'INPUT') {
+      if (e.code === 'Space' && !draftBox && !editingBox && document.activeElement.tagName !== 'INPUT') {
         setIsSpaceDown(true);
         e.preventDefault();
       }
@@ -332,41 +364,91 @@ const AnnotationCanvas = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [draftBox]);
+  }, [draftBox, editingBox]);
 
-  const handleWheel = useCallback((e) => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
 
-    const delta = e.deltaY < 0 ? 0.1 : -0.1;
-    setViewportZoom((prevZoom) => {
-      let newZoom = prevZoom * (1 + delta);
-      newZoom = Math.max(0.5, Math.min(newZoom, 10));
+    const onWheel = (e) => {
+      e.preventDefault();
       
-      setViewportPan((prevPan) => {
-        const imageX = (mouseX - offset.x - prevPan.x) / prevZoom;
-        const imageY = (mouseY - offset.y - prevPan.y) / prevZoom;
-        return {
-          x: mouseX - offset.x - imageX * newZoom,
-          y: mouseY - offset.y - imageY * newZoom
-        };
+      // Zoom vào vị trí con trỏ chuột (giống Roboflow)
+      const rect = container.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      const delta = e.deltaY < 0 ? 0.1 : -0.1;
+      setViewportZoom((prevZoom) => {
+        let newZoom = prevZoom * (1 + delta);
+        newZoom = Math.max(0.5, Math.min(newZoom, 10));
+        
+        setViewportPan((prevPan) => {
+          const imageX = (mouseX - offset.x - prevPan.x) / (scale * prevZoom);
+          const imageY = (mouseY - offset.y - prevPan.y) / (scale * prevZoom);
+          return {
+            x: mouseX - offset.x - imageX * (scale * newZoom),
+            y: mouseY - offset.y - imageY * (scale * newZoom)
+          };
+        });
+        return newZoom;
       });
-      return newZoom;
-    });
-  }, [offset]);
+    };
+
+    container.addEventListener('wheel', onWheel, { passive: false });
+    return () => container.removeEventListener('wheel', onWheel);
+  }, [offset, scale]);
 
   const handleMouseDown = (e) => {
-    if (readOnly || draftBox) return; 
+    if (readOnly || draftBox || editingBox) return; 
     const pos = getCanvasPos(e);
 
+    // Xử lý Pan (Middle click hoặc Space)
     if (e.button === 1 || isSpaceDown) {
       setIsPanning(true);
-      setStartPoint({ ...pos, panX: viewportPan.x, panY: viewportPan.y });
+      setPanStart({ ...pos, panX: viewportPan.x, panY: viewportPan.y });
       return;
     }
     
+    if (interactionMode === 'pan') {
+      // Kiểm tra có resize/move box nào không
+      if (activeAnnId) {
+        const ann = annotations.find(a => a.id === activeAnnId);
+        if (ann) {
+          const rect = yoloToCanvas(ann);
+          const handle = getHandleAtPos(pos.x, pos.y, rect);
+          if (handle) {
+            setResizing({
+              annId: ann.id,
+              handle,
+              startPos: pos,
+              startRect: rect,
+              currentRect: rect
+            });
+            return;
+          }
+        }
+      }
+      
+      // Nếu click vào box thì set editingBox
+      if (hoveredAnnotation) {
+        const ann = annotations.find(a => a.id === hoveredAnnotation);
+        onAnnotationFocus?.(ann.id);
+        const rect = yoloToCanvas(ann);
+        setEditingBox({ ann, canvasRect: rect });
+        setEditSearchText('');
+        return;
+      } else {
+        onAnnotationFocus?.(null);
+      }
+
+      // Pan (nếu không click trúng gì)
+      setIsPanning(true);
+      setPanStart({ ...pos, panX: viewportPan.x, panY: viewportPan.y });
+      return;
+    }
+
+    // Draw mode
     const effScale = scale * viewportZoom;
     const effOffsetX = offset.x + viewportPan.x;
     const effOffsetY = offset.y + viewportPan.y;
@@ -386,10 +468,41 @@ const AnnotationCanvas = ({
     const pos = getCanvasPos(e);
     setMousePos(pos);
 
-    if (isPanning && startPoint) {
+    if (isPanning && panStart) {
       setViewportPan({
-        x: startPoint.panX + (pos.x - startPoint.x),
-        y: startPoint.panY + (pos.y - startPoint.y)
+        x: panStart.panX + (pos.x - panStart.x),
+        y: panStart.panY + (pos.y - panStart.y)
+      });
+      return;
+    }
+
+    if (resizing) {
+      const dx = pos.x - resizing.startPos.x;
+      const dy = pos.y - resizing.startPos.y;
+      let { x, y, w, h } = resizing.startRect;
+
+      if (resizing.handle === 'se') { w += dx; h += dy; }
+      if (resizing.handle === 'sw') { x += dx; w -= dx; h += dy; }
+      if (resizing.handle === 'ne') { y += dy; w += dx; h -= dy; }
+      if (resizing.handle === 'nw') { x += dx; y += dy; w -= dx; h -= dy; }
+      if (resizing.handle === 'e') { w += dx; }
+      if (resizing.handle === 'w') { x += dx; w -= dx; }
+      if (resizing.handle === 's') { h += dy; }
+      if (resizing.handle === 'n') { y += dy; h -= dy; }
+
+      // Clamp
+      const effScale = scale * viewportZoom;
+      const effOffsetX = offset.x + viewportPan.x;
+      const effOffsetY = offset.y + viewportPan.y;
+      const maxW = imageDimensions.width * effScale;
+      const maxH = imageDimensions.height * effScale;
+
+      if (w < 10) w = 10;
+      if (h < 10) h = 10;
+      
+      setResizing({
+        ...resizing,
+        currentRect: { x, y, w, h }
       });
       return;
     }
@@ -404,41 +517,85 @@ const AnnotationCanvas = ({
       return;
     }
 
-    let found = null;
-    for (const ann of annotations) {
-      const rect = yoloToCanvas(ann);
-      if (
-        pos.x >= rect.x && pos.x <= rect.x + rect.w &&
-        pos.y >= rect.y && pos.y <= rect.y + rect.h
-      ) {
-        found = ann.id;
-        break;
+    // Hover logic
+    if (interactionMode === 'pan' && !draftBox && !editingBox) {
+      let found = null;
+      let cursor = 'grab';
+
+      // Check resize handles first if there is an active annotation
+      if (activeAnnId) {
+        const ann = annotations.find(a => a.id === activeAnnId);
+        if (ann) {
+          const rect = yoloToCanvas(ann);
+          const handle = getHandleAtPos(pos.x, pos.y, rect);
+          if (handle) {
+            found = ann.id;
+            if (handle === 'nw' || handle === 'se') cursor = 'nwse-resize';
+            else if (handle === 'ne' || handle === 'sw') cursor = 'nesw-resize';
+            else if (handle === 'n' || handle === 's') cursor = 'ns-resize';
+            else if (handle === 'e' || handle === 'w') cursor = 'ew-resize';
+          }
+        }
       }
+
+      if (!found) {
+        for (let i = annotations.length - 1; i >= 0; i--) {
+          const ann = annotations[i];
+          const rect = yoloToCanvas(ann);
+          if (
+            pos.x >= rect.x && pos.x <= rect.x + rect.w &&
+            pos.y >= rect.y && pos.y <= rect.y + rect.h
+          ) {
+            found = ann.id;
+            cursor = 'pointer';
+            break;
+          }
+        }
+      }
+      
+      setHoveredAnnotation(found);
+      if (canvasRef.current) canvasRef.current.style.cursor = found ? cursor : 'grab';
+    } else {
+      setHoveredAnnotation(null);
+      if (canvasRef.current) canvasRef.current.style.cursor = (isSpaceDown || isPanning) ? 'grabbing' : 'crosshair';
     }
-    setHoveredAnnotation(found);
   };
 
   const handleMouseUp = () => {
     if (isPanning) {
       setIsPanning(false);
-      setStartPoint(null);
+      setPanStart(null);
       return;
     }
 
-    if (!drawing || !startPoint || !currentPoint) {
+    if (resizing) {
+      const bbox = canvasToYolo(
+        resizing.currentRect.x,
+        resizing.currentRect.y,
+        resizing.currentRect.x + resizing.currentRect.w,
+        resizing.currentRect.y + resizing.currentRect.h
+      );
+      if (bbox) {
+        onAnnotationUpdate?.(resizing.annId, bbox);
+      }
+      setResizing(null);
+      return;
+    }
+
+    if (drawing && startPoint && currentPoint) {
+      const bbox = canvasToYolo(startPoint.x, startPoint.y, currentPoint.x, currentPoint.y);
+      if (bbox) {
+        const x = Math.min(startPoint.x, currentPoint.x);
+        const y = Math.min(startPoint.y, currentPoint.y);
+        const w = Math.abs(currentPoint.x - startPoint.x);
+        const h = Math.abs(currentPoint.y - startPoint.y);
+        setDraftBox({ ...bbox, canvasRect: { x, y, w, h } });
+        setSearchText('');
+      }
       setDrawing(false);
+      setStartPoint(null);
+      setCurrentPoint(null);
       return;
-    }
-
-    const bbox = canvasToYolo(startPoint.x, startPoint.y, currentPoint.x, currentPoint.y);
-    if (bbox) {
-      // Luôn hiện popup draftBox để xác nhận hoặc chọn class
-      const x = Math.min(startPoint.x, currentPoint.x);
-      const y = Math.min(startPoint.y, currentPoint.y);
-      const w = Math.abs(currentPoint.x - startPoint.x);
-      const h = Math.abs(currentPoint.y - startPoint.y);
-      setDraftBox({ ...bbox, canvasRect: { x, y, w, h } });
-      setSearchText('');
     }
 
     setDrawing(false);
@@ -446,26 +603,12 @@ const AnnotationCanvas = ({
     setCurrentPoint(null);
   };
 
-  const handleDoubleClick = (e) => {
-    if (readOnly) return;
-    const pos = getCanvasPos(e);
-
-    for (const ann of annotations) {
-      const rect = yoloToCanvas(ann);
-      if (
-        pos.x >= rect.x && pos.x <= rect.x + rect.w &&
-        pos.y >= rect.y && pos.y <= rect.y + rect.h
-      ) {
-        onAnnotationDelete?.(ann.id);
-        break;
-      }
-    }
-  };
-
   const handleMouseLeave = () => {
     setDrawing(false); 
     setIsPanning(false);
+    setResizing(null);
     setStartPoint(null);
+    setPanStart(null);
     setHoveredAnnotation(null);
     setMousePos(null);
   };
@@ -477,11 +620,7 @@ const AnnotationCanvas = ({
   return (
     <div
       ref={containerRef}
-      onWheel={handleWheel}
-      className={cn(
-        'relative w-full h-full min-h-[400px] bg-[#0c0d12] rounded-xl overflow-hidden',
-        (!readOnly && !draftBox && !isPanning && !isSpaceDown) ? 'cursor-crosshair' : (isPanning || isSpaceDown ? 'cursor-grab' : 'cursor-default')
-      )}
+      className="relative w-full h-full min-h-[400px] bg-[#0c0d12] rounded-xl overflow-hidden"
     >
       <canvas
         ref={canvasRef}
@@ -490,11 +629,10 @@ const AnnotationCanvas = ({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
-        onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
       />
 
-      {/* Popup tạo/chọn class khi vẽ xong mà chưa chọn class */}
+      {/* Popup tạo class (Draw mode) */}
       {draftBox && (
         <div 
           className="absolute z-20 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl p-3 w-56 flex flex-col gap-2 pointer-events-auto"
@@ -561,6 +699,77 @@ const AnnotationCanvas = ({
         </div>
       )}
 
+      {/* Popup sửa class (Pan mode) */}
+      {editingBox && (
+        <div 
+          className="absolute z-20 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl p-3 w-56 flex flex-col gap-2 pointer-events-auto"
+          style={{
+            left: Math.min(editingBox.canvasRect.x + editingBox.canvasRect.w + 12, containerRef.current?.clientWidth - 230 || 0),
+            top: Math.max(10, Math.min(editingBox.canvasRect.y, containerRef.current?.clientHeight - 150 || 0))
+          }}
+        >
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-semibold text-slate-300">Sửa class</span>
+            <button onClick={() => setEditingBox(null)} className="text-slate-500 hover:text-white">
+              <X size={14} />
+            </button>
+          </div>
+          <input 
+            autoFocus
+            type="text"
+            placeholder="Tìm hoặc đổi class..."
+            value={editSearchText}
+            onChange={(e) => setEditSearchText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && editSearchText.trim() && !classes.find(c => c.name.toLowerCase() === editSearchText.trim().toLowerCase())) {
+                onAnnotationUpdate?.(editingBox.ann.id, { className: editSearchText.trim() });
+                setEditingBox(null);
+              }
+              if (e.key === 'Escape') setEditingBox(null);
+            }}
+            className="bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 w-full"
+          />
+          <div className="max-h-32 overflow-y-auto flex flex-col gap-1 mt-1">
+            {classes.filter(c => c.name.toLowerCase().includes(editSearchText.toLowerCase())).map(c => (
+              <button 
+                key={c.id} 
+                onClick={() => { 
+                  onAnnotationUpdate?.(editingBox.ann.id, { class_id: c.id });
+                  setEditingBox(null);
+                }}
+                className={cn(
+                  "text-left text-xs px-2 py-1.5 rounded transition-colors flex items-center justify-between",
+                  editingBox.ann.class_id === c.id ? "bg-blue-500/20 text-blue-300" : "text-slate-300 hover:bg-slate-700"
+                )}
+              >
+                <span>{c.name}</span>
+                {editingBox.ann.class_id === c.id && <span className="text-[10px] bg-blue-500/30 px-1 rounded">Current</span>}
+              </button>
+            ))}
+            {editSearchText.trim() && !classes.find(c => c.name.toLowerCase() === editSearchText.trim().toLowerCase()) && (
+              <button 
+                onClick={() => {
+                  onAnnotationUpdate?.(editingBox.ann.id, { className: editSearchText.trim() });
+                  setEditingBox(null);
+                }}
+                className="text-left text-xs text-blue-400 hover:bg-slate-700 px-2 py-1.5 rounded transition-colors font-medium"
+              >
+                + Đổi thành "{editSearchText.trim()}"
+              </button>
+            )}
+          </div>
+          <button 
+            onClick={() => {
+              onAnnotationDelete?.(editingBox.ann.id);
+              setEditingBox(null);
+            }}
+            className="text-xs text-red-400 hover:text-red-300 hover:bg-red-400/10 text-center py-1 mt-1 rounded"
+          >
+            Xóa Box Này
+          </button>
+        </div>
+      )}
+
       {!imageLoaded && imageUrl && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="w-8 h-8 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
@@ -573,10 +782,41 @@ const AnnotationCanvas = ({
         </div>
       )}
 
-      {/* Hướng dẫn và Zoom control */}
+      {/* Toolbar và Controls */}
       {!readOnly && imageLoaded && (
         <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between text-[10px] text-slate-500 pointer-events-none">
-          <span>Kéo chuột vẽ box • Giữ Space (hoặc chuột giữa) kéo để Pan • Lăn chuột để Zoom</span>
+          <div className="flex items-center gap-2 pointer-events-auto">
+            <div className="flex items-center bg-slate-900/90 border border-slate-700/50 rounded-lg p-1 backdrop-blur-md">
+              <button
+                onClick={() => { setInteractionMode('draw'); setEditingBox(null); }}
+                className={cn(
+                  "p-1.5 rounded flex items-center gap-1.5 transition-colors",
+                  interactionMode === 'draw' ? "bg-blue-500/20 text-blue-400" : "text-slate-400 hover:text-white"
+                )}
+                title="Chế độ Vẽ (Draw)"
+              >
+                <MousePointer2 size={16} />
+                <span className="font-medium px-1">Draw</span>
+              </button>
+              <button
+                onClick={() => { setInteractionMode('pan'); setDraftBox(null); }}
+                className={cn(
+                  "p-1.5 rounded flex items-center gap-1.5 transition-colors",
+                  interactionMode === 'pan' ? "bg-blue-500/20 text-blue-400" : "text-slate-400 hover:text-white"
+                )}
+                title="Chế độ Bàn tay (Pan/Select)"
+              >
+                <Hand size={16} />
+                <span className="font-medium px-1">Hand</span>
+              </button>
+            </div>
+            {interactionMode === 'draw' ? (
+              <span>Kéo để vẽ • Lăn chuột để Zoom</span>
+            ) : (
+              <span>Kéo để Pan • Click box để Sửa • Kéo góc để Resize</span>
+            )}
+          </div>
+
           <div className="pointer-events-auto flex items-center gap-3 bg-slate-900/90 border border-slate-700/50 rounded-lg px-2.5 py-1 backdrop-blur-md">
             <button 
               onClick={() => setViewportZoom(z => Math.max(0.5, z - 0.1))}
@@ -601,7 +841,6 @@ const AnnotationCanvas = ({
               RESET
             </button>
           </div>
-          <span>{annotations.length} annotations</span>
         </div>
       )}
     </div>
